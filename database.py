@@ -384,6 +384,44 @@ def list_documents(
     ]
 
 
+def delete_document(
+    document_id: int,
+    db_path: Optional[Union[str, Path]] = None,
+) -> bool:
+    """Delete a document and cascade-delete its associated fingerprints.
+
+    Preserves other documents, recipients, and unrelated records.
+    Safely respects SQLite foreign key constraints.
+
+    Args:
+        document_id: Primary key ID of the document to delete.
+        db_path: Path to database.
+
+    Returns:
+        True if the document existed and was deleted, False otherwise.
+    """
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM documents WHERE id = ?",
+            (document_id,),
+        ).fetchone()
+        if row is None:
+            return False
+
+        # First delete all associated fingerprints to prevent FK violation or orphaned records
+        conn.execute(
+            "DELETE FROM fingerprints WHERE document_id = ?",
+            (document_id,),
+        )
+        # Delete the document record
+        conn.execute(
+            "DELETE FROM documents WHERE id = ?",
+            (document_id,),
+        )
+        return True
+
+
+
 # ==============================================================================
 # Fingerprint Operations
 # ==============================================================================

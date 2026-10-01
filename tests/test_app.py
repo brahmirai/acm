@@ -299,4 +299,29 @@ def test_gemini_missing_api_key_error(monkeypatch):
         gemini_service.get_gemini_client(api_key=None)
 
 
+def test_register_new_document_form_removed_from_audit_registry():
+    """Verify Register New Document form is completely removed from Audit Registry & Stats view."""
+    import inspect
+    source = inspect.getsource(app.view_audit_log)
+    assert "Register New Document" not in source
+    assert "new_doc_form" not in source
+
+
+def test_delete_document_action_present_in_audit_registry():
+    """Verify Delete Document section is present and wired to database.delete_document."""
+    import inspect
+    source = inspect.getsource(app.view_audit_log)
+    assert "Delete Document" in source
+    assert "database.delete_document" in source
+
+
+def test_document_issuance_source_upload_presence():
+    """Verify Document Issuance view presents source document upload workflow."""
+    import inspect
+    source = inspect.getsource(app.view_document_issuance)
+    assert "Upload Source Document" in source
+    assert "pdf_generator.embed_fingerprint_in_pdf" in source
+
+
+
 

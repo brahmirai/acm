@@ -285,3 +285,63 @@ def test_dashboard_statistics(test_db: Path):
     assert updated_stats["recipients"] == 3
     assert updated_stats["fingerprints"] == 2
     assert updated_stats["investigations"] == 0
+
+
+# 11. Document Deletion & Cascade Fingerprint Cleanup
+def test_delete_document_success_and_cascade(test_db: Path):
+    """Verify document deletion removes the document and cascades to its fingerprints,
+    preserving unrelated documents, recipients, and maintaining valid DB constraints."""
+    doc1 = database.create_document("Doc to Delete", "CLASSIFIED", "Content 1", db_path=test_db)
+    doc2 = database.create_document("Doc to Keep", "RESTRICTED", "Content 2", db_path=test_db)
+
+    rec1 = database.create_recipient("REC-DEL-01", "Alice", "Center A", db_path=test_db)
+    rec2 = database.create_recipient("REC-DEL-02", "Bob", "Center B", db_path=test_db)
+
+    # Issue fingerprints for both documents
+    fp1 = database.save_fingerprint(doc1.id, rec1.id, "FP-TO-DELETE-1", db_path=test_db)
+    fp2 = database.save_fingerprint(doc1.id, rec2.id, "FP-TO-DELETE-2", db_path=test_db)
+    fp3 = database.save_fingerprint(doc2.id, rec1.id, "FP-TO-KEEP", db_path=test_db)
+
+    # Verify initial state
+    assert len(database.get_fingerprints_for_document(doc1.id, db_path=test_db)) == 2
+    assert len(database.get_fingerprints_for_document(doc2.id, db_path=test_db)) == 1
+
+    # Perform deletion of doc1
+    result = database.delete_document(doc1.id, db_path=test_db)
+    assert result is True
+
+    # doc1 is gone
+    assert database.get_document_by_id(doc1.id, db_path=test_db) is None
+    # doc1's fingerprints are cleaned up (no orphaned records)
+    assert database.get_fingerprints_for_document(doc1.id, db_path=test_db) == []
+    assert database.find_fingerprint("FP-TO-DELETE-1", db_path=test_db) is None
+    assert database.find_fingerprint("FP-TO-DELETE-2", db_path=test_db) is None
+
+    # doc2 and its fingerprints remain intact
+    doc2_retrieved = database.get_document_by_id(doc2.id, db_path=test_db)
+    assert doc2_retrieved is not None
+    assert doc2_retrieved.document_name == "Doc to Keep"
+    assert len(database.get_fingerprints_for_document(doc2.id, db_path=test_db)) == 1
+    assert database.find_fingerprint("FP-TO-KEEP", db_path=test_db) is not None
+
+    # Both recipients remain intact
+    recipients = database.list_recipients(db_path=test_db)
+    assert len(recipients) == 2
+    assert any(r.recipient_uid == "REC-DEL-01" for r in recipients)
+    assert any(r.recipient_uid == "REC-DEL-02" for r in recipients)
+
+    # Database constraints remain valid: can create new document and fingerprint
+    doc3 = database.create_document("Doc 3", "OPEN", "Content 3", db_path=test_db)
+    fp_new = database.save_fingerprint(doc3.id, rec1.id, "FP-NEW-01", db_path=test_db)
+    assert fp_new.id is not None
+
+
+def test_delete_document_nonexistent_and_empty_db(test_db: Path):
+    """Verify delete_document safely handles non-existent IDs and empty databases."""
+    # Empty DB
+    assert database.delete_document(99999, db_path=test_db) is False
+
+    # Populated DB with nonexistent ID
+    database.create_document("Existing Doc", "BRIEF", "Body", db_path=test_db)
+    assert database.delete_document(99999, db_path=test_db) is False
+

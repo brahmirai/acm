@@ -233,3 +233,112 @@ def test_10_missing_and_unsupported_file_handling(tmp_path: Path):
 
     with pytest.raises(ValueError, match="Unsupported document format"):
         document_parser.extract_document_text(unsupported_file)
+
+
+# Test 11: In-Situ PDF Format Preservation & Watermark Embedding
+def test_11_embed_fingerprint_in_pdf_preserves_multipage_and_visual_elements(tmp_path: Path):
+    """Verify embed_fingerprint_in_pdf preserves multi-page layouts, graphics, and tables while embedding watermark."""
+    import fitz
+
+    # Create a complex multi-page source PDF with vector graphics and layout
+    source_pdf_path = tmp_path / "source_exam.pdf"
+    doc = fitz.open()
+
+    # Page 1: Physics with vector rectangle & title
+    p1 = doc.new_page(width=595, height=842)
+    p1.draw_rect(fitz.Rect(50, 50, 545, 120), color=(0.1, 0.2, 0.5), fill=(0.9, 0.95, 1.0))
+    p1.insert_text(fitz.Point(70, 90), "NEET NATIONAL ENTRANCE TRIAL 2026 - SECTION A: PHYSICS", fontsize=12)
+    p1.insert_text(fitz.Point(70, 150), "Q1. Calculate the relativistic momentum of particle Alpha.", fontsize=10)
+
+    # Page 2: Chemistry with vector lines & question
+    p2 = doc.new_page(width=595, height=842)
+    p2.draw_line(fitz.Point(50, 80), fitz.Point(545, 80), color=(0.8, 0.2, 0.2), width=2)
+    p2.insert_text(fitz.Point(70, 110), "SECTION B: ORGANIC CHEMISTRY & MOLECULAR STRUCTURE", fontsize=12)
+    p2.insert_text(fitz.Point(70, 150), "Q2. Identify the rate-determining transition state intermediate.", fontsize=10)
+
+    doc.save(str(source_pdf_path))
+    doc.close()
+
+    # Verify source document has NO fingerprint
+    source_text = document_parser.extract_text_from_pdf(source_pdf_path)
+    assert fingerprint.decode_fingerprint(source_text) is None
+
+    # Embed watermark for NEET-DEMO-042
+    recipient = Recipient(recipient_uid="NEET-DEMO-042", name="Dr. A. Sharma", center="Bhopal Center 501")
+    output_pdf_path = tmp_path / "personalized_exam.pdf"
+
+    pdf_generator.embed_fingerprint_in_pdf(
+        source_pdf=source_pdf_path,
+        recipient=recipient,
+        output_path=output_pdf_path,
+    )
+
+    assert output_pdf_path.exists()
+    assert output_pdf_path.stat().st_size > 0
+
+    # Verify pages and visual content are preserved
+    out_doc = fitz.open(str(output_pdf_path))
+    assert len(out_doc) == 2
+    # Verify visible text still exists on both pages
+    p1_text = out_doc[0].get_text("text")
+    p2_text = out_doc[1].get_text("text")
+    out_doc.close()
+
+    assert "SECTION A: PHYSICS" in p1_text
+    assert "SECTION B: ORGANIC CHEMISTRY" in p2_text
+
+    # Verify round-trip watermark extraction and source attribution
+    extracted_full = document_parser.extract_text_from_pdf(output_pdf_path)
+    recovered_uid = fingerprint.decode_fingerprint(extracted_full)
+    assert recovered_uid == "NEET-DEMO-042"
+
+
+# Test 12: embed_fingerprint_in_pdf accepts bytes and path
+def test_12_embed_fingerprint_in_pdf_accepts_bytes(tmp_path: Path):
+    """Verify embed_fingerprint_in_pdf works identically when passed raw bytes."""
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(fitz.Point(50, 50), "Test Document for Bytes Stream Injection", fontsize=11)
+    raw_bytes = doc.tobytes()
+    doc.close()
+
+    recipient = Recipient(recipient_uid="UPSC-DEMO-088", name="Officer R. Verma", center="Delhi Center 102")
+    output_path = tmp_path / "watermarked_bytes.pdf"
+
+    pdf_generator.embed_fingerprint_in_pdf(
+        source_pdf=raw_bytes,
+        recipient=recipient,
+        output_path=output_path,
+    )
+
+    extracted = document_parser.extract_text_from_pdf(output_path)
+    assert fingerprint.decode_fingerprint(extracted) == "UPSC-DEMO-088"
+
+
+# Test 13: embed_fingerprint_in_pdf error handling for empty and corrupt PDFs
+def test_13_embed_fingerprint_in_pdf_error_handling(tmp_path: Path):
+    """Verify embed_fingerprint_in_pdf handles 0-byte, corrupt, and missing files with clear errors."""
+    recipient = Recipient(recipient_uid="TEST-RECIPIENT", name="Test Recipient", center="Center 1")
+    output_path = tmp_path / "out.pdf"
+
+    # Empty bytes
+    with pytest.raises(ValueError, match="empty"):
+        pdf_generator.embed_fingerprint_in_pdf(b"", recipient, output_path)
+
+    # Empty file
+    empty_file = tmp_path / "empty.pdf"
+    empty_file.write_bytes(b"")
+    with pytest.raises(ValueError, match="empty"):
+        pdf_generator.embed_fingerprint_in_pdf(empty_file, recipient, output_path)
+
+    # Corrupt bytes
+    with pytest.raises(ValueError, match="Corrupted or invalid"):
+        pdf_generator.embed_fingerprint_in_pdf(b"not a real pdf content", recipient, output_path)
+
+    # Missing file
+    missing_file = tmp_path / "does_not_exist.pdf"
+    with pytest.raises(FileNotFoundError):
+        pdf_generator.embed_fingerprint_in_pdf(missing_file, recipient, output_path)
+

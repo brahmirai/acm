@@ -283,86 +283,230 @@ def view_document_issuance() -> None:
     """Render Document Issuance & Canary Watermarking view."""
     st.markdown("## 📄 Document Issuance & Canary Fingerprinting")
     st.markdown(
-        "Issue a confidential examination or policy document to an authorized recipient. "
-        "CanaryDocs encodes an **invisible zero-width Unicode steganographic watermark** "
-        "containing the recipient's UID before generating the official PDF."
+        "Upload a source examination paper or policy document, select an authorized recipient, "
+        "and generate a personalized copy with an **invisible zero-width Unicode watermark**. "
+        "For PDF uploads, the original visual layout, fonts, tables, and images are fully preserved."
     )
 
     docs = database.list_documents()
     recipients = database.list_recipients()
 
-    if not docs or not recipients:
+    if not recipients:
         st.warning(
-            "Database has no documents or recipients. Please reset demo data in the sidebar "
-            "or register documents and recipients in the Audit Registry & Stats view."
+            "⚠️ No authorized recipients found in registry. Please reset demo data in the sidebar "
+            "or register recipients in the Audit Registry & Stats view before issuing documents."
         )
         return
 
     col_left, col_right = st.columns([1, 1], gap="large")
 
     with col_left:
-        st.markdown("### 1. Select Parameters")
+        st.markdown("### 1. Select Parameters & Source Document")
 
-        # Document Selection
-        doc_names = [f"{d.id}: {d.document_name} ({d.document_type})" for d in docs]
-        doc_idx = st.selectbox("Select Confidential Document", range(len(doc_names)), format_func=lambda i: doc_names[i])
-        selected_doc = docs[doc_idx]
+        # Source Selection Mode
+        source_mode_options = ["📤 Upload Source Document (PDF/TXT)"]
+        if docs:
+            source_mode_options.append("📚 Select from Registered Documents")
+
+        source_mode = st.radio(
+            "Document Source",
+            options=source_mode_options,
+            horizontal=True,
+            key="doc_issuance_source_mode",
+        )
+
+        uploaded_pdf_bytes: Optional[bytes] = None
+        extracted_text = ""
+        source_is_pdf = False
+        doc_name_val = ""
+        doc_type_val = "RESTRICTED_EXAMINATION"
+        selected_doc_model: Optional[Document] = None
+
+        if source_mode == "📤 Upload Source Document (PDF/TXT)":
+            uploaded_file = st.file_uploader(
+                "Upload Source Document",
+                type=["pdf", "txt"],
+                help="Upload the canonical exam paper or document. PDF formatting will be preserved.",
+                key="issuance_source_uploader",
+            )
+
+            if uploaded_file is not None:
+                file_bytes = uploaded_file.getvalue()
+                if len(file_bytes) == 0:
+                    st.error("Uploaded file is empty (0 bytes). Please upload a valid document.")
+                else:
+                    file_ext = Path(uploaded_file.name).suffix.lower()
+                    if file_ext == ".pdf":
+                        source_is_pdf = True
+                        try:
+                            import fitz
+                            doc_fitz = fitz.open(stream=file_bytes, filetype="pdf")
+                            page_count = len(doc_fitz)
+                            doc_fitz.close()
+
+                            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_in:
+                                tmp_in.write(file_bytes)
+                                tmp_in_path = Path(tmp_in.name)
+                            try:
+                                extracted_text = document_parser.extract_text_from_pdf(tmp_in_path)
+                            finally:
+                                try:
+                                    tmp_in_path.unlink()
+                                except OSError:
+                                    pass
+
+                            uploaded_pdf_bytes = file_bytes
+                            char_count = len(extracted_text)
+
+                            if char_count == 0 or not extracted_text.strip():
+                                st.warning(
+                                    f"⚠️ Uploaded PDF '{uploaded_file.name}' has **{page_count} page(s)**, but contains **no extractable digital text** "
+                                    "(it may be a scanned image). Digital text is required for zero-width watermarking."
+                                )
+                            else:
+                                st.success(
+                                    f"✅ Source PDF '{uploaded_file.name}' parsed successfully: "
+                                    f"**{page_count} page(s)**, **{char_count:,} characters** extracted."
+                                )
+                        except Exception as exc:
+                            st.error(f"Failed to parse uploaded PDF: {exc}")
+                    elif file_ext == ".txt":
+                        try:
+                            extracted_text = file_bytes.decode("utf-8")
+                            char_count = len(extracted_text)
+                            if char_count == 0:
+                                st.error("Uploaded text file is empty (0 bytes).")
+                            else:
+                                st.success(
+                                    f"✅ Source TXT '{uploaded_file.name}' parsed successfully: "
+                                    f"**{char_count:,} characters** extracted."
+                                )
+                        except Exception as exc:
+                            st.error(f"Failed to read TXT file as UTF-8: {exc}")
+                    else:
+                        st.error(f"Unsupported file format '{file_ext}'. Supported formats are: .pdf, .txt")
+
+                    default_title = Path(uploaded_file.name).stem.replace("_", " ").replace("-", " ").title()
+                    doc_name_val = default_title
+
+            doc_name = st.text_input(
+                "Document Name / Title",
+                value=doc_name_val,
+                placeholder="e.g. NEET Mock Examination 2026",
+                key="issuance_doc_name_input",
+            )
+            doc_type = st.selectbox(
+                "Document Classification",
+                ["RESTRICTED_EXAMINATION", "CONFIDENTIAL", "STRICTLY_CONFIDENTIAL", "SECRET", "OFFICIAL_SENSITIVE"],
+                key="issuance_doc_type_select",
+            )
+
+        else:
+            # Select from registered documents
+            doc_names = [f"{d.id}: {d.document_name} ({d.document_type})" for d in docs]
+            doc_idx = st.selectbox(
+                "Select Confidential Document",
+                range(len(doc_names)),
+                format_func=lambda i: doc_names[i],
+                key="issuance_existing_doc_select",
+            )
+            selected_doc_model = docs[doc_idx]
+            doc_name = selected_doc_model.document_name
+            doc_type = selected_doc_model.document_type
+            extracted_text = selected_doc_model.original_text
 
         # Recipient Selection
         rec_labels = [
             f"{r.name} • UID: {r.recipient_uid} • {r.center}"
             for r in recipients
         ]
-        rec_idx = st.selectbox("Select Authorized Recipient", range(len(rec_labels)), format_func=lambda i: rec_labels[i])
+        rec_idx = st.selectbox(
+            "Select Authorized Recipient",
+            range(len(rec_labels)),
+            format_func=lambda i: rec_labels[i],
+            key="issuance_rec_select",
+        )
         selected_rec = recipients[rec_idx]
 
-        # Issuance metadata card
+        # Issuance metadata summary card
+        fidelity_label = "In-Situ PDF Stream (100% Visual Preservation)" if source_is_pdf else "Generated Canary Layout"
         st.markdown("#### 📋 Issuance Summary")
         st.markdown(
             f"""
             <div class="forensic-card">
-                <b>Document:</b> {selected_doc.document_name}<br>
-                <b>Classification:</b> {selected_doc.document_type}<br>
+                <b>Document Title:</b> {doc_name or '(Awaiting Upload/Selection)'}<br>
+                <b>Classification:</b> {doc_type}<br>
                 <b>Authorized Recipient:</b> {selected_rec.name}<br>
                 <b>Recipient UID / Watermark:</b> <code>{selected_rec.recipient_uid}</code><br>
-                <b>Examination Center:</b> {selected_rec.center}<br>
+                <b>Assigned Center:</b> {selected_rec.center}<br>
+                <b>Visual Formatting Preservation:</b> {fidelity_label}<br>
                 <b>Steganography Strategy:</b> Zero-width Unicode codepoints (U+200B..U+FEFF)
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        generate_clicked = st.button("🪶 Generate Personalized Canary Document", type="primary")
+        generate_clicked = st.button("🪶 Generate Personalized Canary Document", type="primary", key="btn_generate_canary")
 
     with col_right:
         st.markdown("### 2. Document Preview & Output")
 
         if generate_clicked:
-            # 1. Register or retrieve fingerprint issuance in SQLite
+            # Validation
+            if not doc_name.strip():
+                st.error("Document Name / Title is required.")
+                return
+
+            if not extracted_text.strip() and not uploaded_pdf_bytes:
+                st.error("No document content available. Please upload a valid document or select an existing one.")
+                return
+
+            # 1. Register canonical document in SQLite if new
+            if selected_doc_model is None:
+                for d in docs:
+                    if d.document_name == doc_name.strip() and d.original_text == extracted_text:
+                        selected_doc_model = d
+                        break
+                if selected_doc_model is None:
+                    selected_doc_model = database.create_document(
+                        document_name=doc_name.strip(),
+                        document_type=doc_type.strip(),
+                        original_text=extracted_text,
+                    )
+
+            # 2. Register or retrieve fingerprint issuance in SQLite
             existing_fp = database.find_fingerprint(selected_rec.recipient_uid)
             if existing_fp is None:
                 database.create_fingerprint(
-                    document_id=selected_doc.id,  # type: ignore
+                    document_id=selected_doc_model.id,  # type: ignore
                     recipient_id=selected_rec.id,  # type: ignore
                     fingerprint=selected_rec.recipient_uid,
                 )
 
-            # 2. Encode text with zero-width fingerprint
+            # 3. Generate personalized PDF and encoded text
             encoded_text = fingerprint.encode_text(
-                selected_doc.original_text, selected_rec.recipient_uid
+                selected_doc_model.original_text, selected_rec.recipient_uid
             )
 
-            # 3. Generate Canary PDF to temporary file with guaranteed cleanup
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_pdf:
                 tmp_pdf_path = Path(tmp_pdf.name)
 
             try:
-                pdf_generator.generate_canary_pdf(
-                    document=selected_doc,
-                    recipient=selected_rec,
-                    encoded_text=encoded_text,
-                    output_path=tmp_pdf_path,
-                )
+                if source_is_pdf and uploaded_pdf_bytes:
+                    # In-situ injection directly into uploaded PDF stream to preserve exact visual format
+                    pdf_generator.embed_fingerprint_in_pdf(
+                        source_pdf=uploaded_pdf_bytes,
+                        recipient=selected_rec,
+                        output_path=tmp_pdf_path,
+                    )
+                else:
+                    # Generate official Canary PDF using fpdf2
+                    pdf_generator.generate_canary_pdf(
+                        document=selected_doc_model,
+                        recipient=selected_rec,
+                        encoded_text=encoded_text,
+                        output_path=tmp_pdf_path,
+                    )
                 pdf_bytes = tmp_pdf_path.read_bytes()
             finally:
                 try:
@@ -374,10 +518,9 @@ def view_document_issuance() -> None:
             st.session_state["generated_filename"] = f"CANARY_{selected_rec.recipient_uid}.pdf"
             st.session_state["encoded_text_preview"] = encoded_text
 
-            # Steganographic Telemetry
-            orig_len = len(selected_doc.original_text)
+            orig_len = len(selected_doc_model.original_text)
             encoded_len = len(encoded_text)
-            stego_chars = encoded_len - orig_len
+            stego_chars = max(0, encoded_len - orig_len)
 
             st.success("✅ Personalized Canary Document Generated Successfully!")
 
@@ -386,6 +529,8 @@ def view_document_issuance() -> None:
                 <div class="forensic-card">
                     <span class="badge-confirmed">PROVENANCE EMBEDDED</span><br><br>
                     <b>Target Recipient:</b> {selected_rec.name} (<code>{selected_rec.recipient_uid}</code>)<br>
+                    <b>Document Title:</b> {selected_doc_model.document_name}<br>
+                    <b>Format Preserved:</b> {'Yes (In-Situ PyMuPDF Injection)' if source_is_pdf else 'Standard Canary Layout'}<br>
                     <b>Steganographic Payload:</b> {stego_chars} invisible zero-width Unicode codepoints<br>
                     <b>Integrity Checksum:</b> 8-bit XOR verified<br>
                     <b>Framing:</b> Start Marker <code>\\u200b\\u200c</code> • End Marker <code>\\u200d\\ufeff</code><br>
@@ -402,6 +547,7 @@ def view_document_issuance() -> None:
                 file_name=st.session_state["generated_filename"],
                 mime="application/pdf",
                 type="primary",
+                key="btn_download_canary_pdf",
             )
 
             st.download_button(
@@ -409,26 +555,28 @@ def view_document_issuance() -> None:
                 data=encoded_text.encode("utf-8"),
                 file_name=f"CANARY_{selected_rec.recipient_uid}.txt",
                 mime="text/plain",
+                key="btn_download_canary_txt",
             )
 
             st.divider()
 
-            # Fast demo transfer button
-            if st.button("🚀 Send to Leak Investigation Tab for Instant Verification"):
+            if st.button("🚀 Send to Leak Investigation Tab for Instant Verification", key="btn_send_to_investigation"):
                 st.session_state["test_file_bytes"] = pdf_bytes
                 st.session_state["test_file_name"] = st.session_state["generated_filename"]
                 st.session_state["selected_view"] = "🔍 Leak Investigation"
                 st.rerun()
 
         else:
-            st.info("Click 'Generate Personalized Canary Document' to produce a watermarked PDF.")
-            with st.expander("👁️ View Canonical Document Text", expanded=True):
-                st.text_area(
-                    "Original Canonical Text",
-                    value=selected_doc.original_text,
-                    height=320,
-                    disabled=True,
-                )
+            st.info("Upload/select a document and click 'Generate Personalized Canary Document' to produce a watermarked copy.")
+            if extracted_text:
+                with st.expander("👁️ View Canonical Document Text", expanded=False):
+                    st.text_area(
+                        "Extracted Canonical Text",
+                        value=extracted_text,
+                        height=280,
+                        disabled=True,
+                    )
+
 
 
 # ==============================================================================
@@ -1008,7 +1156,7 @@ def view_audit_log() -> None:
         docs = database.list_documents()
         st.markdown(f"### Registered Canonical Documents ({len(docs)})")
         if not docs:
-            st.info("No canonical documents currently registered. Use the form below to register a document.")
+            st.info("No canonical documents currently registered. Upload and issue documents in the Document Issuance tab.")
         else:
             doc_rows = [
                 {
@@ -1022,24 +1170,50 @@ def view_audit_log() -> None:
             ]
             st.dataframe(doc_rows, use_container_width=True)
 
-        with st.expander("➕ Register New Document"):
-            with st.form("new_doc_form"):
-                new_name = st.text_input("Document Name", placeholder="e.g. UPSC Prelims Mock 2026")
-                new_type = st.text_input("Document Type / Classification", placeholder="e.g. RESTRICTED_EXAMINATION")
-                new_content = st.text_area("Document Text Content", height=150)
-                submit_doc = st.form_submit_button("Register Document")
+            st.markdown("---")
+            with st.expander("🗑️ Delete Document", expanded=False):
+                st.markdown("Permanently remove a document and its associated issued fingerprints from the registry.")
+                doc_del_options = [f"{d.id}: {d.document_name} ({d.document_type})" for d in docs]
+                del_idx = st.selectbox(
+                    "Select Document to Delete",
+                    range(len(doc_del_options)),
+                    format_func=lambda i: doc_del_options[i],
+                    key="select_doc_to_delete",
+                )
+                doc_to_delete = docs[del_idx]
 
-                if submit_doc:
-                    if new_name.strip() and new_content.strip():
-                        database.create_document(
-                            new_name.strip(),
-                            new_type.strip() or "RESTRICTED_EXAMINATION",
-                            new_content.strip(),
-                        )
-                        st.success(f"Document '{new_name}' registered successfully.")
-                        st.rerun()
-                    else:
-                        st.error("Name and Content are required.")
+                assoc_fps = database.get_fingerprints_for_document(doc_to_delete.id)
+
+                st.markdown(
+                    f"""
+                    <div class="forensic-card" style="border-left-color: #d9534f;">
+                        <b>Document ID:</b> {doc_to_delete.id}<br>
+                        <b>Document Name:</b> {doc_to_delete.document_name}<br>
+                        <b>Classification:</b> {doc_to_delete.document_type}<br>
+                        <b>Character Count:</b> {len(doc_to_delete.original_text or ''):,} chars<br>
+                        <b>Created At:</b> {(doc_to_delete.created_at or '')[:19].replace('T', ' ')}<br>
+                        <b>Associated Issued Fingerprints:</b> {len(assoc_fps)}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                confirm_del = st.checkbox(
+                    f"I confirm that I want to permanently delete '{doc_to_delete.document_name}' and all {len(assoc_fps)} associated fingerprint record(s).",
+                    key="confirm_delete_doc_checkbox",
+                )
+
+                if st.button("🗑️ Delete Document", type="primary", disabled=not confirm_del, key="btn_delete_doc"):
+                    try:
+                        deleted = database.delete_document(doc_to_delete.id)
+                        if deleted:
+                            st.success(f"Document '{doc_to_delete.document_name}' and its associated fingerprints were successfully deleted.")
+                            st.rerun()
+                        else:
+                            st.error("Failed to delete document: record not found.")
+                    except Exception as exc:
+                        st.error(f"Error during document deletion: {exc}")
+
 
     with tab_recs:
         recipients = database.list_recipients()

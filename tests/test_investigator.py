@@ -209,3 +209,53 @@ def test_6_error_and_malformed_input(tmp_path: Path, inv_db: Path):
     res_none = investigator.investigate_raw_text(None, db_path=inv_db)
     assert res_none.matched is False
     assert res_none.status == investigator.STATE_ERROR
+
+
+# 7. In-Situ Watermarked PDF Investigation & Post-Deletion Registry Cleanup
+def test_7_in_situ_watermarked_pdf_investigation_and_deletion_cleanup(tmp_path: Path, inv_db: Path):
+    """Verify that an in-situ watermarked PDF is attributed via Leak Investigation,
+    and after document deletion, the fingerprint is treated as unregistered."""
+    import fitz
+
+    # 1. Create canonical multi-page exam PDF
+    src_pdf = tmp_path / "original_exam_paper.pdf"
+    doc_fitz = fitz.open()
+    p1 = doc_fitz.new_page()
+    p1.insert_text(fitz.Point(50, 50), "CONFIDENTIAL TRIAL EXAM 2026 - PART A", fontsize=12)
+    doc_fitz.save(str(src_pdf))
+    doc_fitz.close()
+
+    # 2. Canonical document has no watermark
+    res_canonical = investigator.investigate_document(src_pdf, db_path=inv_db)
+    assert res_canonical.status == investigator.STATE_NO_FINGERPRINT
+
+    # 3. Register document and recipient
+    doc_record = database.create_document("Exam Paper 2026", "RESTRICTED", "CONFIDENTIAL TRIAL EXAM 2026 - PART A", db_path=inv_db)
+    recipient = database.create_recipient("NEET-DEMO-042", "Dr. A. Sharma", "Bhopal Center", db_path=inv_db)
+    database.save_fingerprint(doc_record.id, recipient.id, recipient.recipient_uid, db_path=inv_db)
+
+    # 4. Generate in-situ format-preserved personalized PDF
+    personalized_pdf = tmp_path / "issued_exam_42.pdf"
+    pdf_generator.embed_fingerprint_in_pdf(
+        source_pdf=src_pdf,
+        recipient=recipient,
+        output_path=personalized_pdf,
+    )
+
+    # 5. Investigate the personalized PDF: must attribute to recipient
+    res_issued = investigator.investigate_document(personalized_pdf, db_path=inv_db)
+    assert res_issued.matched is True
+    assert res_issued.status == investigator.STATE_SOURCE_IDENTIFIED
+    assert res_issued.recipient.recipient_uid == "NEET-DEMO-042"
+    assert res_issued.document.id == doc_record.id
+
+    # 6. Delete document from registry
+    assert database.delete_document(doc_record.id, db_path=inv_db) is True
+
+    # 7. Investigate again: fingerprint survives in file, but is now unregistered in DB
+    res_after_del = investigator.investigate_document(personalized_pdf, db_path=inv_db)
+    assert res_after_del.matched is False
+    assert res_after_del.status == investigator.STATE_FINGERPRINT_UNKNOWN
+    assert res_after_del.fingerprint == "NEET-DEMO-042"
+    assert res_after_del.recipient is None
+

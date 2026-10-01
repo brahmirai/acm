@@ -369,3 +369,95 @@ def generate_personalized_pdf(
         document.original_text, recipient.recipient_uid
     )
     return generate_canary_pdf(document, recipient, encoded_text, output_path)
+
+
+def embed_fingerprint_in_pdf(
+    source_pdf: Union[str, Path, bytes, bytearray],
+    recipient: Recipient,
+    output_path: Union[str, Path],
+) -> Path:
+    """Inject zero-width fingerprint payload into an existing PDF document.
+
+    Preserves original page structure, vector layouts, tables, images,
+    headers/footers, fonts, and mathematical notation by inserting an invisible
+    text layer directly into the PDF content stream using PyMuPDF (fitz)
+    without re-rasterizing or altering visual elements.
+
+    The fingerprint is rendered using render_mode=3 (invisible text: neither filled
+    nor stroked) and zero-width Unicode characters, making it completely invisible
+    to a human reader while surviving digital extraction via PyMuPDF.
+
+    Args:
+        source_pdf: Source PDF file path or raw PDF bytes.
+        recipient: Authorized recipient whose UID is encoded as the fingerprint.
+        output_path: Destination filesystem path for the output PDF.
+
+    Returns:
+        Path to the generated watermarked PDF file.
+
+    Raises:
+        FileNotFoundError: If a file path is provided but does not exist.
+        ValueError: If the source PDF is empty or invalid.
+        RuntimeError: If PyMuPDF is not available.
+    """
+    try:
+        import fitz
+    except ImportError:  # pragma: no cover
+        raise RuntimeError("PyMuPDF (fitz) is required for PDF format preservation.")
+
+    out_file = Path(output_path).resolve()
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Validate and open input PDF
+    if isinstance(source_pdf, (bytes, bytearray)):
+        if len(source_pdf) == 0:
+            raise ValueError("Source PDF is empty (0 bytes).")
+        try:
+            doc = fitz.open(stream=bytes(source_pdf), filetype="pdf")
+        except Exception as exc:
+            raise ValueError(f"Corrupted or invalid PDF content: {exc}") from exc
+    else:
+        src_path = Path(source_pdf).resolve()
+        if not src_path.exists():
+            raise FileNotFoundError(f"Source PDF file not found: {source_pdf}")
+        if not src_path.is_file():
+            raise ValueError(f"Source PDF path is not a file: {source_pdf}")
+        if src_path.stat().st_size == 0:
+            raise ValueError("Source PDF is empty (0 bytes).")
+        try:
+            doc = fitz.open(str(src_path))
+        except Exception as exc:
+            raise ValueError(f"Corrupted or invalid PDF file: {exc}") from exc
+
+    try:
+        if len(doc) == 0:
+            raise ValueError("Source PDF has no pages.")
+
+        payload = fingerprint.encode_text("", recipient.recipient_uid)
+        font_reg, _ = _discover_unicode_font()
+
+        # Inject payload into each page so any leaked page preserves provenance
+        for page_idx in range(len(doc)):
+            page = doc[page_idx]
+            if font_reg:
+                page.insert_font(fontname="canaryfont", fontfile=font_reg)
+                fontname = "canaryfont"
+            else:
+                fontname = "helv"
+
+            # Render mode 3 = invisible text (neither filled nor stroked)
+            page.insert_text(
+                fitz.Point(10, 10),
+                payload,
+                fontname=fontname,
+                fontsize=0.1,
+                color=(1, 1, 1),
+                render_mode=3,
+            )
+
+        doc.save(str(out_file))
+    finally:
+        doc.close()
+
+    return out_file
+
