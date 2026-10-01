@@ -1031,17 +1031,55 @@ def view_forensic_analysis() -> None:
         if severity not in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
             severity = "MEDIUM"
         severity_class = f"severity-{severity.lower()}"
+
+        raw_conf = getattr(report, "severity_confidence", None)
+        confidence = str(raw_conf).strip().upper() if raw_conf else "MEDIUM"
+        if confidence not in ("LOW", "MEDIUM", "HIGH"):
+            confidence = "MEDIUM"
+
+        raw_qual = getattr(report, "evidence_quality", None)
+        evidence_quality = str(raw_qual).strip().upper() if raw_qual else "MEDIUM"
+        if evidence_quality not in ("LOW", "MEDIUM", "HIGH"):
+            evidence_quality = "MEDIUM"
+
+        raw_basis = getattr(report, "severity_basis", None) or []
+        if isinstance(raw_basis, list):
+            severity_basis = [str(b).strip() for b in raw_basis if str(b).strip()]
+        elif isinstance(raw_basis, str) and raw_basis.strip():
+            severity_basis = [raw_basis.strip()]
+        else:
+            severity_basis = []
+
         summary = getattr(report, "summary", None) or getattr(report, "impact", None) or "Forensic analysis completed."
+
+        basis_html = ""
+        if severity_basis:
+            items_html = "".join(f"<li>{item}</li>" for item in severity_basis)
+            basis_html = f"""
+            <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.2);">
+                <b>Why this severity:</b>
+                <ul style="margin: 4px 0 0 0; padding-left: 20px;">
+                    {items_html}
+                </ul>
+            </div>
+            """
 
         st.markdown(
             f"""
             <div class="{severity_class}">
-                <h3 style="margin: 0;">LEAK SEVERITY: {severity}</h3>
-                <p style="margin: 4px 0 0 0;">{summary}</p>
+                <div style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap;">
+                    <h3 style="margin: 0;">FORENSIC SEVERITY: {severity}</h3>
+                    <span style="font-size: 0.9em; opacity: 0.95;">
+                        <b>Confidence:</b> {confidence} &nbsp;|&nbsp; <b>Evidence Quality:</b> {evidence_quality}
+                    </span>
+                </div>
+                <p style="margin: 6px 0 0 0;">{summary}</p>
+                {basis_html}
             </div>
             """,
             unsafe_allow_html=True,
         )
+
 
         col_c1, col_c2 = st.columns([1, 1], gap="medium")
 

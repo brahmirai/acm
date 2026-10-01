@@ -334,3 +334,294 @@ def test_14_api_failure_redacts_sensitive_document_contents(caplog):
     assert "[REDACTED_DOCUMENT_TEXT]" in caplog.text
     assert "[REDACTED_DOCUMENT_TEXT]" in report.impact
 
+
+# TEST 15: Severity A - LOW (Spelling, OCR noise, minor formatting)
+def test_15_severity_low_spelling_ocr_formatting():
+    """TEST A: Verify LOW severity classification for minor spelling, OCR noise, and formatting."""
+    low_response = """
+    {
+      "severity": "LOW",
+      "severity_confidence": "HIGH",
+      "evidence_quality": "HIGH",
+      "severity_basis": [
+        "Differences limited to minor typographical spelling variations in Question 3",
+        "Minor OCR scanning noise and whitespace shifts with no substantive textual alteration",
+        "No confidential or sensitive information exposed beyond public draft"
+      ],
+      "impact": "Negligible security impact; public curriculum draft unaffected.",
+      "content_changes": ["Punctuation and spacing differences."],
+      "possible_paraphrasing": {"detected": false, "explanation": "No semantic paraphrasing."},
+      "possible_redactions": {"detected": false, "explanation": "No sections omitted."},
+      "recommendations": ["Retain document for standard audit archives."],
+      "summary": "Low severity incident involving only cosmetic and OCR formatting differences."
+    }
+    """
+    report = gemini_service.parse_forensic_response(low_response)
+    assert report.severity == "LOW"
+    assert report.severity_confidence == "HIGH"
+    assert report.evidence_quality == "HIGH"
+    assert len(report.severity_basis) == 3
+    assert "typographical" in report.severity_basis[0]
+
+
+# TEST 16: Severity B - MEDIUM (Moderate content changes, limited redactions)
+def test_16_severity_medium_moderate_changes_limited_redactions():
+    """TEST B: Verify MEDIUM severity classification for moderate changes and limited redactions."""
+    med_response = """
+    {
+      "severity": "MEDIUM",
+      "severity_confidence": "HIGH",
+      "evidence_quality": "HIGH",
+      "severity_basis": [
+        "Moderate content modifications detected in Section B instructions",
+        "Selective redaction of examiner notes and trial item markings",
+        "Sensitive answer keys remain unexposed"
+      ],
+      "impact": "Moderate operational concern regarding examiner guidance exposure.",
+      "content_changes": ["Examiner comments removed."],
+      "possible_paraphrasing": {"detected": true, "explanation": "Possible paraphrasing detected in Section B."},
+      "possible_redactions": {"detected": true, "explanation": "Examiner notes omitted."},
+      "recommendations": ["Review distribution chain for examiner copies."],
+      "summary": "Medium severity leak with selective redactions of internal guidance."
+    }
+    """
+    report = gemini_service.parse_forensic_response(med_response)
+    assert report.severity == "MEDIUM"
+    assert report.severity_confidence == "HIGH"
+    assert report.evidence_quality == "HIGH"
+    assert len(report.severity_basis) == 3
+
+
+# TEST 17: Severity C - HIGH (Substantial sensitive content exposure)
+def test_17_severity_high_substantial_sensitive_exposure():
+    """TEST C: Verify HIGH severity classification for substantial sensitive content exposure."""
+    high_response = """
+    {
+      "severity": "HIGH",
+      "severity_confidence": "HIGH",
+      "evidence_quality": "HIGH",
+      "severity_basis": [
+        "Multiple live examination questions exposed verbatim",
+        "Substantive scoring metrics and candidate benchmarks leaked",
+        "Significant breach of confidential trial assessment materials"
+      ],
+      "impact": "Substantial breach compromising confidential assessment integrity.",
+      "content_changes": ["Full Section A and Section B questions exposed."],
+      "possible_paraphrasing": {"detected": false, "explanation": "Verbatim reproduction."},
+      "possible_redactions": {"detected": false, "explanation": "Full questions published without redaction."},
+      "recommendations": ["Preserve forensic evidence artifacts and review chain-of-custody."],
+      "summary": "High severity leak compromising core confidential questions."
+    }
+    """
+    report = gemini_service.parse_forensic_response(high_response)
+    assert report.severity == "HIGH"
+    assert report.severity_confidence == "HIGH"
+    assert report.evidence_quality == "HIGH"
+    assert len(report.severity_basis) == 3
+
+
+# TEST 18: Severity D - CRITICAL (Broad exposure of highly sensitive material)
+def test_18_severity_critical_broad_exposure():
+    """TEST D: Verify CRITICAL severity classification for broad, near-complete exposure of highly sensitive material."""
+    crit_response = """
+    {
+      "severity": "CRITICAL",
+      "severity_confidence": "HIGH",
+      "evidence_quality": "HIGH",
+      "severity_basis": [
+        "Near-complete exposure of entire national question bank with full official answer keys",
+        "Extensive compromise of national trial assessment security",
+        "Direct concrete evidence of complete paper dissemination prior to scheduled release"
+      ],
+      "impact": "Catastrophic compromise requiring immediate curriculum invalidation.",
+      "content_changes": ["Entire question bank and answer keys leaked."],
+      "possible_paraphrasing": {"detected": false, "explanation": "Verbatim leak."},
+      "possible_redactions": {"detected": false, "explanation": "No redactions; complete disclosure."},
+      "recommendations": ["Immediately notify national examination steering committee."],
+      "summary": "Critical breach involving comprehensive live question bank disclosure."
+    }
+    """
+    report = gemini_service.parse_forensic_response(crit_response)
+    assert report.severity == "CRITICAL"
+    assert report.severity_confidence == "HIGH"
+    assert report.evidence_quality == "HIGH"
+    assert len(report.severity_basis) == 3
+
+
+# TEST 19: Severity E - Unrelated documents assessed conservatively
+def test_19_unrelated_documents_conservative_assessment():
+    """TEST E: Verify that completely unrelated documents receive conservative severity,
+    not automatically escalated to HIGH or CRITICAL simply because they differ."""
+    unrelated_response = """
+    {
+      "severity": "LOW",
+      "severity_confidence": "LOW",
+      "evidence_quality": "LOW",
+      "severity_basis": [
+        "The leaked text appears completely unrelated to the canonical baseline document",
+        "Document variance does not indicate security compromise of the canonical asset",
+        "No evidence of sensitive canonical content exposure within leaked text"
+      ],
+      "impact": "Leaked text and canonical baseline appear unrelated; no confirmed exposure of target asset.",
+      "content_changes": ["Documents share no common paragraphs or sections."],
+      "possible_paraphrasing": {"detected": false, "explanation": "Texts appear completely unrelated."},
+      "possible_redactions": {"detected": false, "explanation": "Cannot determine redactions between unrelated texts."},
+      "recommendations": ["Verify whether correct baseline document was selected for comparison."],
+      "summary": "Conservative LOW severity assessment: documents appear substantively unrelated."
+    }
+    """
+    report = gemini_service.parse_forensic_response(unrelated_response)
+    assert report.severity == "LOW"
+    assert report.severity != "HIGH"
+    assert report.severity != "CRITICAL"
+    assert report.severity_confidence == "LOW"
+    assert report.evidence_quality == "LOW"
+    assert any("unrelated" in reason.lower() for reason in report.severity_basis)
+
+
+# TEST 20: Severity F - OCR uncertainty lowers evidence quality and confidence
+def test_20_ocr_uncertainty_reduces_evidence_quality_and_confidence():
+    """TEST F: Verify poor/incomplete OCR reduces evidence_quality and severity_confidence,
+    without automatically classifying as HIGH severity."""
+    ocr_response = """
+    {
+      "severity": "MEDIUM",
+      "severity_confidence": "LOW",
+      "evidence_quality": "LOW",
+      "severity_basis": [
+        "Leaked text exhibits severe OCR scanning artifacts, missing characters, and fragmented lines",
+        "Evidence quality is degraded due to raster extraction limitations",
+        "Observed text fragments indicate possible partial question disclosure, but full verification requires cleaner copy"
+      ],
+      "impact": "Potential partial exposure hindered by poor OCR extraction fidelity.",
+      "content_changes": ["Multiple lines fragmented or unreadable due to OCR artifacts."],
+      "possible_paraphrasing": {"detected": false, "explanation": "Unable to verify paraphrasing due to degraded OCR text."},
+      "possible_redactions": {"detected": false, "explanation": "Missing sections may be OCR scanning defects rather than intentional redaction."},
+      "recommendations": ["Obtain higher-resolution scan or digital copy for re-investigation."],
+      "summary": "Medium severity with low confidence due to poor OCR extraction quality."
+    }
+    """
+    report = gemini_service.parse_forensic_response(ocr_response)
+    assert report.severity == "MEDIUM"
+    assert report.severity_confidence == "LOW"
+    assert report.evidence_quality == "LOW"
+    assert len(report.severity_basis) == 3
+
+
+# TEST 21: G - Missing optional fields handled safely
+def test_21_missing_optional_fields_handled_safely():
+    """TEST G: Verify that responses omitting severity_confidence, evidence_quality, or severity_basis
+    parse safely with valid defaults without crashing."""
+    legacy_response = """
+    {
+      "severity": "MEDIUM",
+      "impact": "Standard advisory findings.",
+      "content_changes": ["Minor change"],
+      "possible_paraphrasing": {"detected": false, "explanation": "None"},
+      "possible_redactions": {"detected": false, "explanation": "None"},
+      "recommendations": ["Review logs"],
+      "summary": "Summary text"
+    }
+    """
+    report = gemini_service.parse_forensic_response(legacy_response)
+    assert report.severity == "MEDIUM"
+    assert report.severity_confidence == "MEDIUM"  # Default
+    assert report.evidence_quality == "MEDIUM"      # Default
+    assert isinstance(report.severity_basis, list)
+    assert report.impact == "Standard advisory findings."
+    assert report.summary == "Summary text"
+
+
+# TEST 22: H - Invalid severity handled safely
+def test_22_invalid_severity_handled_safely():
+    """TEST H: Verify that unparseable or unrecognized severity values safely fallback to MEDIUM."""
+    invalid_sev_response = """
+    {
+      "severity": "CATASTROPHIC_EXTREME_ALERT",
+      "severity_confidence": "HIGH",
+      "evidence_quality": "HIGH",
+      "severity_basis": ["Some reason"]
+    }
+    """
+    report = gemini_service.parse_forensic_response(invalid_sev_response)
+    assert report.severity == "MEDIUM"
+    assert report.severity_confidence == "HIGH"
+    assert report.evidence_quality == "HIGH"
+    assert report.severity_basis == ["Some reason"]
+
+
+# TEST 23: I - Invalid severity_confidence handled safely
+def test_23_invalid_severity_confidence_handled_safely():
+    """TEST I: Verify that unrecognized severity_confidence values safely fallback to MEDIUM."""
+    invalid_conf_response = """
+    {
+      "severity": "HIGH",
+      "severity_confidence": "ABSOLUTELY_CERTAIN_100%",
+      "evidence_quality": "HIGH",
+      "severity_basis": ["Document compromised"]
+    }
+    """
+    report = gemini_service.parse_forensic_response(invalid_conf_response)
+    assert report.severity == "HIGH"
+    assert report.severity_confidence == "MEDIUM"  # Normalized fallback
+    assert report.evidence_quality == "HIGH"
+
+
+# TEST 24: J - Invalid evidence_quality handled safely
+def test_24_invalid_evidence_quality_handled_safely():
+    """TEST J: Verify that unrecognized evidence_quality values safely fallback to MEDIUM."""
+    invalid_qual_response = """
+    {
+      "severity": "LOW",
+      "severity_confidence": "LOW",
+      "evidence_quality": "PRISTINE_GOLD_STANDARD",
+      "severity_basis": ["Spelling only"]
+    }
+    """
+    report = gemini_service.parse_forensic_response(invalid_qual_response)
+    assert report.severity == "LOW"
+    assert report.severity_confidence == "LOW"
+    assert report.evidence_quality == "MEDIUM"  # Normalized fallback
+
+
+# TEST 25: K - Invalid severity_basis handled safely
+def test_25_invalid_severity_basis_handled_safely():
+    """TEST K: Verify that string, non-string, or malformed severity_basis formats do not crash the parser."""
+    # String instead of list
+    str_basis = """
+    {
+      "severity": "LOW",
+      "severity_confidence": "HIGH",
+      "evidence_quality": "HIGH",
+      "severity_basis": "Single string explanation instead of list"
+    }
+    """
+    rep_str = gemini_service.parse_forensic_response(str_basis)
+    assert isinstance(rep_str.severity_basis, list)
+    assert len(rep_str.severity_basis) == 1
+    assert rep_str.severity_basis[0] == "Single string explanation instead of list"
+
+    # List containing numbers, booleans, and empty strings
+    mixed_basis = """
+    {
+      "severity": "MEDIUM",
+      "severity_basis": [123, true, "Valid textual finding", "   ", null]
+    }
+    """
+    rep_mixed = gemini_service.parse_forensic_response(mixed_basis)
+    assert isinstance(rep_mixed.severity_basis, list)
+    assert "Valid textual finding" in rep_mixed.severity_basis
+    assert "123" in rep_mixed.severity_basis
+    assert "True" in rep_mixed.severity_basis
+
+    # Dictionary instead of list
+    dict_basis = """
+    {
+      "severity": "HIGH",
+      "severity_basis": {"reason": "unexpected dict"}
+    }
+    """
+    rep_dict = gemini_service.parse_forensic_response(dict_basis)
+    assert isinstance(rep_dict.severity_basis, list)
+
+

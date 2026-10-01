@@ -323,5 +323,17 @@ def test_document_issuance_source_upload_presence():
     assert "pdf_generator.embed_fingerprint_in_pdf" in source
 
 
+def test_forensic_severity_display_contract():
+    """Verify view_forensic_analysis includes confidence, evidence quality, and severity basis."""
+    import inspect
+    source = inspect.getsource(app.view_forensic_analysis)
+    assert "FORENSIC SEVERITY" in source
+    assert "Confidence:" in source
+    assert "Evidence Quality:" in source
+    assert "Why this severity:" in source
+    assert "severity_basis" in source
+
+
+
 
 

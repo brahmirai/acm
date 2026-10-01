@@ -51,19 +51,64 @@ except ImportError:  # pragma: no cover
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 SYSTEM_INSTRUCTION = """You are an expert digital document forensic analyst for CANARYDOCS.
-Your task is to conduct an AI-assisted comparative forensic evaluation between a canonical original document and a leaked document text.
+Your task is to conduct an objective, AI-assisted comparative forensic evaluation between a canonical original document and a leaked document text.
 
-CRITICAL FORENSIC AND SAFETY RULES:
-1. Your analysis is strictly ADVISORY and comparative.
-2. NEVER guess, speculate, or infer who leaked the document. Source attribution is handled solely through cryptographic/steganographic database lookup.
-3. NEVER accuse any person or entity of wrongdoing.
-4. NEVER invent evidence, fabricate access logs, or claim certainty about intent.
-5. Do NOT claim you can definitively prove an LLM performed paraphrasing. Use careful phrasing such as 'Possible paraphrasing detected' or 'The leaked text appears semantically similar to the original despite wording variations.'
-6. Formulate practical investigator-oriented recommendations (e.g. preserve evidence artifacts, review logs, verify distribution records). Do NOT recommend automated account revocation, deletion, or punishment.
+CORE SEVERITY CLASSIFICATION DEFINITIONS:
+- LOW:
+  * Minor spelling mistakes or typographical errors
+  * OCR noise, scanning artifacts, or text extraction irregularities
+  * Minor formatting, spacing, or punctuation differences
+  * Non-material wording or stylistic changes
+  * No meaningful sensitive or confidential information exposure
+- MEDIUM:
+  * Noticeable substantive content changes or omissions
+  * Limited redactions or selective withholding
+  * Moderate semantic alterations or rewording
+  * Limited or moderate sensitive information exposure
+- HIGH:
+  * Substantial sensitive or confidential content exposure
+  * Major alteration or falsification of substantive content
+  * Multiple sensitive sections exposed, removed, or materially changed
+  * Significant operational, reputational, or institutional security impact
+- CRITICAL:
+  * Broad or near-complete exposure of highly classified or sensitive material
+  * Major security compromise involving extensive sensitive information
+  * Use CRITICAL ONLY when concrete evidence directly and unambiguously demonstrates extreme impact
 
-Output MUST be a valid JSON object matching this exact shape:
+CRITICAL FORENSIC, SAFETY, AND EVALUATION RULES:
+1. ADVISORY & COMPARATIVE: Your analysis is strictly advisory. Never claim mathematical or legal proof.
+2. NO SOURCE ATTRIBUTION: NEVER guess, speculate, or infer who leaked the document, their identity, role, or motivation. Source attribution in CANARYDOCS is handled strictly through deterministic cryptographic/steganographic database lookup.
+3. NEVER INFER INTENT: Do not speculate about malice, intent, or culpability. State only observable facts.
+4. EVIDENCE-BASED SEVERITY:
+   * Do NOT assign HIGH or CRITICAL merely because the leaked document is substantially different from the canonical document.
+   * Severity must reflect actual security impact and sensitive information exposure, NOT simply the count of textual differences.
+   * Never fabricate or invent evidence not present in the supplied texts.
+5. DISTINCT FINDINGS: Distinguish clearly and keep separate:
+   * "content changes" (factual differences in text)
+   * "sensitive information exposed" (what confidential data is leaked)
+   * "possible redactions" (omitted or withheld parts)
+   * "possible paraphrasing" (rewording or semantic drift)
+   These are NOT automatically equivalent.
+6. CAUTIOUS PARAPHRASING: Do NOT claim you can definitively prove an LLM performed paraphrasing. Use cautious wording such as "Possible paraphrasing detected."
+7. OCR & TEXT QUALITY HANDLING:
+   * Screenshots, raster images, and OCR do NOT preserve zero-width Unicode fingerprints.
+   * If the leaked text is from OCR or exhibits scanning noise, OCR errors, or incomplete extraction, reduce evidence_quality to LOW or MEDIUM and reduce severity_confidence appropriately.
+   * Do NOT treat OCR noise or extraction artifacts as intentional alterations or security severity.
+8. UNRELATED DOCUMENTS:
+   * If the canonical baseline and leaked document appear completely unrelated, explicitly indicate that they appear unrelated.
+   * Assess the incident conservatively. Do NOT treat unrelatedness itself as evidence of a high-severity security breach.
+9. ACTIONABLE RECOMMENDATIONS: Recommend forensic artifact preservation, log review, and distribution verification. Do NOT recommend automated punitive actions.
+
+REQUIRED JSON OUTPUT FORMAT:
+You MUST respond with a valid JSON object matching this exact schema:
 {
   "severity": "LOW" | "MEDIUM" | "HIGH" | "CRITICAL",
+  "severity_confidence": "LOW" | "MEDIUM" | "HIGH",
+  "evidence_quality": "LOW" | "MEDIUM" | "HIGH",
+  "severity_basis": [
+    "Concrete evidence-based reason 1 from supplied texts",
+    "Concrete evidence-based reason 2 from supplied texts"
+  ],
   "impact": "Detailed assessment of operational and confidentiality impact.",
   "content_changes": [
     "Meaningful difference 1",
@@ -71,15 +116,15 @@ Output MUST be a valid JSON object matching this exact shape:
   ],
   "possible_paraphrasing": {
     "detected": true | false,
-    "explanation": "Cautious semantic analysis without asserting AI proof."
+    "explanation": "Cautious semantic analysis without asserting LLM proof."
   },
   "possible_redactions": {
     "detected": true | false,
     "explanation": "Identified omissions or withheld sections."
   },
   "recommendations": [
-    "Investigator recommendation 1",
-    "Investigator recommendation 2"
+    "Actionable forensic recommendation 1",
+    "Actionable forensic recommendation 2"
   ],
   "summary": "Concise executive summary of forensic findings."
 }
@@ -219,6 +264,31 @@ def parse_forensic_response(raw_text: str) -> ForensicReport:
                 else "MEDIUM"
             )
 
+            # Validate and normalize severity_confidence
+            raw_conf = str(data.get("severity_confidence", "MEDIUM")).upper()
+            severity_confidence = (
+                raw_conf
+                if raw_conf in ("LOW", "MEDIUM", "HIGH")
+                else "MEDIUM"
+            )
+
+            # Validate and normalize evidence_quality
+            raw_qual = str(data.get("evidence_quality", "MEDIUM")).upper()
+            evidence_quality = (
+                raw_qual
+                if raw_qual in ("LOW", "MEDIUM", "HIGH")
+                else "MEDIUM"
+            )
+
+            # Validate and extract severity_basis (list of strings)
+            raw_basis = data.get("severity_basis", [])
+            if isinstance(raw_basis, list):
+                severity_basis = [str(item).strip() for item in raw_basis if str(item).strip()]
+            elif isinstance(raw_basis, str) and raw_basis.strip():
+                severity_basis = [raw_basis.strip()]
+            else:
+                severity_basis = []
+
             # Extract impact
             impact = str(
                 data.get(
@@ -292,6 +362,9 @@ def parse_forensic_response(raw_text: str) -> ForensicReport:
                 recommendations=recommendations,
                 summary=summary,
                 raw_analysis=raw_text,
+                severity_confidence=severity_confidence,
+                evidence_quality=evidence_quality,
+                severity_basis=severity_basis,
             )
 
     except Exception:
@@ -317,7 +390,13 @@ def parse_forensic_response(raw_text: str) -> ForensicReport:
         ],
         summary="Model returned an unstructured forensic evaluation.",
         raw_analysis=raw_text,
+        severity_confidence="LOW",
+        evidence_quality="LOW",
+        severity_basis=[
+            "Automated structured parsing failed; manual forensic evaluation of raw response required."
+        ],
     )
+
 
 
 def analyze_incident(
@@ -372,6 +451,9 @@ def analyze_incident(
             ],
             summary="Forensic analysis aborted: original document text is empty.",
             raw_analysis="Original text is empty.",
+            severity_confidence="HIGH",
+            evidence_quality="LOW",
+            severity_basis=["Original canonical document text is empty."],
         )
 
     if not leaked_text or not leaked_text.strip():
@@ -393,7 +475,11 @@ def analyze_incident(
             ],
             summary="Forensic analysis aborted: leaked document text is empty.",
             raw_analysis="Leaked text is empty.",
+            severity_confidence="HIGH",
+            evidence_quality="LOW",
+            severity_basis=["Leaked document text is empty or unextracted."],
         )
+
 
     # Initialize Gemini client if not injected
     if client is None:
@@ -482,4 +568,8 @@ def analyze_incident(
             ],
             summary=friendly_summary,
             raw_analysis=err_msg,
+            severity_confidence="LOW",
+            evidence_quality="LOW",
+            severity_basis=[f"Automated AI evaluation encountered a service error: {friendly_summary}"],
         )
+

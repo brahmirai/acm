@@ -159,6 +159,9 @@ class ForensicReport:
         recommendations: Actionable incident response and mitigation steps.
         summary: Concise executive summary of forensic findings.
         raw_analysis: Complete unparsed Gemini model response text.
+        severity_confidence: Confidence level in severity rating ('LOW', 'MEDIUM', 'HIGH').
+        evidence_quality: Quality and completeness of evidence ('LOW', 'MEDIUM', 'HIGH').
+        severity_basis: Concrete evidence-based reasons supporting the severity score.
     """
 
     severity: str
@@ -169,11 +172,17 @@ class ForensicReport:
     recommendations: list[str] = field(default_factory=list)
     summary: str = ""
     raw_analysis: str = ""
+    severity_confidence: str = "MEDIUM"
+    evidence_quality: str = "MEDIUM"
+    severity_basis: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert forensic report to a dictionary representation."""
         return {
             "severity": self.severity,
+            "severity_confidence": self.severity_confidence,
+            "evidence_quality": self.evidence_quality,
+            "severity_basis": self.severity_basis,
             "impact": self.impact,
             "content_changes": self.content_changes,
             "possible_paraphrasing": self.possible_paraphrasing,
@@ -182,3 +191,4 @@ class ForensicReport:
             "summary": self.summary,
             "raw_analysis": self.raw_analysis,
         }
+
