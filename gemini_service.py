@@ -23,11 +23,23 @@ CRITICAL SCIENTIFIC & FORENSIC BOUNDARIES:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import sys
 from typing import Any, Optional
 
 from models import ForensicReport, InvestigationResult
+
+# Configure local diagnostic logger writing to terminal (sys.stderr)
+logger = logging.getLogger("canarydocs.gemini")
+if not logger.handlers:
+    _console_handler = logging.StreamHandler(sys.stderr)
+    _console_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    )
+    logger.addHandler(_console_handler)
+logger.setLevel(logging.INFO)
 
 try:
     from google import genai
@@ -72,6 +84,52 @@ Output MUST be a valid JSON object matching this exact shape:
   "summary": "Concise executive summary of forensic findings."
 }
 """
+
+
+def sanitize_error_message(message: str, secret: Optional[str] = None) -> str:
+    """Sanitize error messages before logging or UI display.
+
+    Redacts Google API keys, authorization headers, bearer tokens, query parameters,
+    and any passed active secrets so they are never leaked in terminal logs or UI.
+
+    Args:
+        message: Raw error message string or exception text.
+        secret: Optional active API key/secret to explicitly scrub.
+
+    Returns:
+        Sanitized, safe error string.
+    """
+    if not message:
+        return ""
+
+    sanitized = str(message)
+
+    # 1. Redact specific active secret if provided
+    if secret and len(secret.strip()) >= 6:
+        sanitized = sanitized.replace(secret.strip(), "[REDACTED_API_KEY]")
+
+    # 2. Redact environment GEMINI_API_KEY if present
+    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if env_key and len(env_key) >= 6:
+        sanitized = sanitized.replace(env_key, "[REDACTED_API_KEY]")
+
+    # 3. Redact Google AI Studio API key pattern (AIza...)
+    sanitized = re.sub(r"AIza[0-9A-Za-z-_]{30,}", "[REDACTED_API_KEY]", sanitized)
+
+    # 4. Redact URL query parameters containing keys (?key=..., &key=...)
+    sanitized = re.sub(r"([?&]key=)[^&\s'\"]+", r"\g<1>[REDACTED_API_KEY]", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"(key=)[^&\s'\"]+", r"\g<1>[REDACTED_API_KEY]", sanitized, flags=re.IGNORECASE)
+
+    # 5. Redact Bearer tokens
+    sanitized = re.sub(r"(Bearer\s+)[^\s,;'\"]+", r"\g<1>[REDACTED_TOKEN]", sanitized, flags=re.IGNORECASE)
+
+    # 6. Redact x-goog-api-key headers
+    sanitized = re.sub(r"(x-goog-api-key\s*[:=]\s*)[^\s,;'\"]+", r"\g<1>[REDACTED_API_KEY]", sanitized, flags=re.IGNORECASE)
+
+    # 7. Redact generic Authorization headers
+    sanitized = re.sub(r"(authorization\s*[:=]\s*)[^\s,;'\"]+", r"\g<1>[REDACTED_AUTH]", sanitized, flags=re.IGNORECASE)
+
+    return sanitized
 
 
 def get_gemini_client(api_key: Optional[str] = None) -> Any:
@@ -267,6 +325,7 @@ def analyze_incident(
     leaked_text: str,
     metadata: Optional[dict[str, Any]] = None,
     client: Optional[Any] = None,
+    api_key: Optional[str] = None,
 ) -> ForensicReport:
     """Perform comparative forensic analysis using Google Gemini.
 
@@ -285,6 +344,7 @@ def analyze_incident(
         leaked_text: Cleaned text extracted from the leaked document.
         metadata: Contextual data (document name, type, issuance details).
         client: Optional injected genai.Client instance (useful for testing).
+        api_key: Optional explicit Gemini API key. Defaults to GEMINI_API_KEY environment variable.
 
     Returns:
         Structured ForensicReport dataclass.
@@ -337,7 +397,7 @@ def analyze_incident(
 
     # Initialize Gemini client if not injected
     if client is None:
-        client = get_gemini_client()
+        client = get_gemini_client(api_key=api_key)
 
     model_name = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
 
@@ -380,10 +440,32 @@ def analyze_incident(
         return parse_forensic_response(raw_output)
 
     except Exception as exc:
+        exc_type = type(exc).__name__
+        err_str = str(exc)
+        err_msg = sanitize_error_message(err_str, secret=api_key)
+
+        # Redact raw document or leaked text contents if reflected in the error
+        if original_text and len(original_text.strip()) > 10:
+            err_msg = err_msg.replace(original_text.strip(), "[REDACTED_DOCUMENT_TEXT]")
+        if leaked_text and len(leaked_text.strip()) > 10:
+            err_msg = err_msg.replace(leaked_text.strip(), "[REDACTED_LEAKED_TEXT]")
+
+        # Log actual exception type and sanitized message to terminal for local debugging
+        logger.error("[CANARYDOCS - GEMINI ERROR] %s: %s", exc_type, err_msg)
+
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str.upper() or "quota" in err_str.lower():
+            friendly_summary = "Gemini API rate limit or quota exceeded (429). Please wait a moment and retry."
+        elif "401" in err_str or "403" in err_str or "API_KEY_INVALID" in err_str.upper() or "PERMISSION_DENIED" in err_str.upper():
+            friendly_summary = "Invalid or unauthorized Gemini API key. Please verify your API key in Google AI Studio."
+        elif "404" in err_str or "NOT_FOUND" in err_str.upper():
+            friendly_summary = f"Gemini model not found (404). Please verify GEMINI_MODEL setting (current: '{model_name}')."
+        else:
+            friendly_summary = "Gemini API request failed. Manual forensic verification required."
+
         # Gracefully handle API or network errors without crashing
         return ForensicReport(
             severity="MEDIUM",
-            impact=f"Automated AI forensic evaluation encountered an error: {exc}",
+            impact=f"Automated AI forensic evaluation encountered an error: {err_msg}",
             content_changes=["Analysis could not complete due to API error."],
             possible_paraphrasing={
                 "detected": False,
@@ -398,6 +480,6 @@ def analyze_incident(
                 "Verify Gemini API connectivity, quotas, and network status.",
                 "Perform manual diffing between original and leaked texts.",
             ],
-            summary=f"AI forensic evaluation error: {exc}",
-            raw_analysis=str(exc),
+            summary=friendly_summary,
+            raw_analysis=err_msg,
         )

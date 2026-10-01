@@ -45,7 +45,14 @@ def extract_text_from_pdf(file_path: Union[str, Path]) -> str:
     if not path.is_file():
         raise ValueError(f"Path is not a regular file: {file_path}")
 
-    doc = fitz.open(str(path))
+    if path.stat().st_size == 0:
+        return ""
+
+    try:
+        doc = fitz.open(str(path))
+    except Exception as exc:
+        raise ValueError(f"Corrupted or invalid PDF file: {exc}") from exc
+
     pages_text: list[str] = []
 
     try:
@@ -87,7 +94,7 @@ def extract_text_from_txt(file_path: Union[str, Path]) -> str:
 
     Raises:
         FileNotFoundError: If the file does not exist.
-        ValueError: If path is not a file.
+        ValueError: If path is not a file or cannot be decoded.
     """
     path = Path(file_path).resolve()
     if not path.exists():
@@ -95,7 +102,13 @@ def extract_text_from_txt(file_path: Union[str, Path]) -> str:
     if not path.is_file():
         raise ValueError(f"Path is not a regular file: {file_path}")
 
-    return path.read_text(encoding="utf-8")
+    if path.stat().st_size == 0:
+        return ""
+
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Failed to decode text file as UTF-8: {exc}") from exc
 
 
 def extract_document_text(file_path: Union[str, Path]) -> str:

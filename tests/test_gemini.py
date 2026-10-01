@@ -244,3 +244,93 @@ def test_11_build_incident_metadata_helper():
     assert metadata["document_name"] == "Exam 2026"
     assert metadata["recipient_uid"] == "UID-042"
     assert metadata["center"] == "Center X"
+
+
+# TEST 12: sanitize_error_message scrubs all forms of credentials
+def test_12_sanitize_error_message_scrubs_all_credentials():
+    """Verify sanitize_error_message removes API keys, tokens, and custom secrets."""
+    # 1. Google API key pattern
+    raw_key = "AIzaSyD_TestKey123456789012345678901234"
+    scrubbed = gemini_service.sanitize_error_message(f"Error at https://example.com?key={raw_key}")
+    assert raw_key not in scrubbed
+    assert "[REDACTED_API_KEY]" in scrubbed
+
+    # 2. Bearer token
+    bearer_raw = "Bearer ya29.a0AfH6SMCredentialToken12345"
+    scrubbed_bearer = gemini_service.sanitize_error_message(f"Auth failure: {bearer_raw}")
+    assert "ya29.a0AfH6SMCredentialToken12345" not in scrubbed_bearer
+    assert "[REDACTED_TOKEN]" in scrubbed_bearer
+
+    # 3. Headers
+    hdr_raw = "x-goog-api-key: custom-secret-key-12345, authorization: Basic xyz"
+    scrubbed_hdr = gemini_service.sanitize_error_message(hdr_raw)
+    assert "custom-secret-key-12345" not in scrubbed_hdr
+    assert "[REDACTED_API_KEY]" in scrubbed_hdr
+    assert "[REDACTED_AUTH]" in scrubbed_hdr
+
+    # 4. Explicit passed secret
+    my_secret = "super-secret-passphrase-999"
+    scrubbed_custom = gemini_service.sanitize_error_message(
+        f"Failed validation for {my_secret}", secret=my_secret
+    )
+    assert my_secret not in scrubbed_custom
+    assert "[REDACTED_API_KEY]" in scrubbed_custom
+
+
+# TEST 13: api_failure logs sanitized exception to terminal
+def test_13_api_failure_logs_sanitized_exception_to_terminal(caplog):
+    """Verify that Gemini API failures log the exception type and sanitized message for debugging."""
+    import logging
+
+    fake_key = "AIzaSyB9876543210zyxwvutsrqponmlkjihgfe"
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = RuntimeError(
+        f"404 NOT_FOUND. models/gemini-2.5-flash is not found at https://generativelanguage.googleapis.com?key={fake_key}"
+    )
+
+    with caplog.at_level(logging.ERROR, logger="canarydocs.gemini"):
+        report = gemini_service.analyze_incident(
+            original_text="Canonical examination text",
+            leaked_text="Leaked examination text",
+            client=mock_client,
+            api_key=fake_key,
+        )
+
+    # 1. Terminal log must contain the error and exception type
+    assert "[CANARYDOCS - GEMINI ERROR]" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "404 NOT_FOUND" in caplog.text
+
+    # 2. Secret must NEVER appear in terminal logs
+    assert fake_key not in caplog.text
+    assert "[REDACTED_API_KEY]" in caplog.text
+
+    # 3. User-facing UI report remains friendly and safe
+    assert fake_key not in report.impact
+    assert fake_key not in report.summary
+    assert "404" in report.summary or "failed" in report.summary.lower()
+
+
+# TEST 14: api_failure redacts sensitive document contents from logs
+def test_14_api_failure_redacts_sensitive_document_contents(caplog):
+    """Verify that reflected confidential document text is redacted from logs."""
+    import logging
+
+    confidential_doc = "SECRET_EXAM_QUESTION_TOP_PRIORITY_NEET_2026_BIOLOGY"
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = RuntimeError(
+        f"Invalid token encountered in prompt: {confidential_doc}"
+    )
+
+    with caplog.at_level(logging.ERROR, logger="canarydocs.gemini"):
+        report = gemini_service.analyze_incident(
+            original_text=confidential_doc,
+            leaked_text="Leaked document text",
+            client=mock_client,
+        )
+
+    # Document text must be scrubbed from log
+    assert confidential_doc not in caplog.text
+    assert "[REDACTED_DOCUMENT_TEXT]" in caplog.text
+    assert "[REDACTED_DOCUMENT_TEXT]" in report.impact
+

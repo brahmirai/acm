@@ -15,10 +15,23 @@ Views:
 from __future__ import annotations
 
 import io
+import logging
 import os
+import re
+import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+# Configure app logger writing to terminal (sys.stderr)
+logger = logging.getLogger("canarydocs.app")
+if not logger.handlers:
+    _app_handler = logging.StreamHandler(sys.stderr)
+    _app_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    )
+    logger.addHandler(_app_handler)
+logger.setLevel(logging.INFO)
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -243,7 +256,9 @@ def render_sidebar() -> str:
                 help="Optional if GEMINI_API_KEY is set in .env. Enter Google AI Studio key.",
             )
             if user_key:
-                st.session_state["custom_gemini_key"] = user_key.strip()
+                clean_key = user_key.strip()
+                st.session_state["custom_gemini_key"] = clean_key
+                os.environ["GEMINI_API_KEY"] = clean_key
             if not gemini_active:
                 st.info("Get a free key from Google AI Studio to enable AI forensic analysis.")
 
@@ -277,7 +292,10 @@ def view_document_issuance() -> None:
     recipients = database.list_recipients()
 
     if not docs or not recipients:
-        st.warning("Database has no documents or recipients. Please reset demo data in the sidebar.")
+        st.warning(
+            "Database has no documents or recipients. Please reset demo data in the sidebar "
+            "or register documents and recipients in the Audit Registry & Stats view."
+        )
         return
 
     col_left, col_right = st.columns([1, 1], gap="large")
@@ -334,22 +352,23 @@ def view_document_issuance() -> None:
                 selected_doc.original_text, selected_rec.recipient_uid
             )
 
-            # 3. Generate Canary PDF to temporary file
+            # 3. Generate Canary PDF to temporary file with guaranteed cleanup
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_pdf:
                 tmp_pdf_path = Path(tmp_pdf.name)
 
-            pdf_generator.generate_canary_pdf(
-                document=selected_doc,
-                recipient=selected_rec,
-                encoded_text=encoded_text,
-                output_path=tmp_pdf_path,
-            )
-
-            pdf_bytes = tmp_pdf_path.read_bytes()
             try:
-                tmp_pdf_path.unlink()
-            except OSError:
-                pass
+                pdf_generator.generate_canary_pdf(
+                    document=selected_doc,
+                    recipient=selected_rec,
+                    encoded_text=encoded_text,
+                    output_path=tmp_pdf_path,
+                )
+                pdf_bytes = tmp_pdf_path.read_bytes()
+            finally:
+                try:
+                    tmp_pdf_path.unlink()
+                except OSError:
+                    pass
 
             st.session_state["generated_pdf_bytes"] = pdf_bytes
             st.session_state["generated_filename"] = f"CANARY_{selected_rec.recipient_uid}.pdf"
@@ -450,8 +469,19 @@ def view_leak_investigation() -> None:
         st.info("Awaiting leaked document upload. Supported formats: .pdf, .txt, .png, .jpg, .jpeg")
         return
 
+    if len(file_bytes) == 0:
+        st.warning("The uploaded file is empty (0 bytes). Please upload a valid document or screenshot.")
+        return
+
     # Process uploaded file
     file_suffix = Path(file_name).suffix.lower()
+
+    if file_suffix not in (".pdf", ".txt", ".png", ".jpg", ".jpeg"):
+        st.error(
+            f"Unsupported file format '{file_suffix or '(no extension)'}'. "
+            "Supported file formats are: .pdf, .txt, .png, .jpg, .jpeg"
+        )
+        return
 
     # Save to temp file for investigation
     with tempfile.NamedTemporaryFile(suffix=file_suffix, delete=False) as tmp_file:
@@ -608,12 +638,17 @@ def view_leak_investigation() -> None:
                                     }
                                     st.session_state["selected_view"] = "🤖 AI Forensic Analysis"
                                     st.rerun()
+                            else:
+                                st.info("No canonical documents registered in database for comparison. You can still paste canonical text in the AI Forensic Analysis view.")
 
                         except Exception as exc:
                             st.error(f"OCR Extraction Failed: {exc}")
 
         else:
-            st.error(f"Unsupported file format: {file_suffix}")
+            st.error(
+                f"Unsupported file format '{file_suffix or '(no extension)'}'. "
+                "Supported file formats are: .pdf, .txt, .png, .jpg, .jpeg"
+            )
 
     finally:
         try:
@@ -804,20 +839,36 @@ def view_forensic_analysis() -> None:
     analyze_btn = st.button("🔍 Run Gemini Forensic Analysis", type="primary", disabled=not api_key)
 
     if analyze_btn:
-        if not original_text.strip() or not leaked_text.strip():
-            st.error("Please provide both Original and Leaked text to compare.")
+        if not api_key:
+            st.error("Gemini API key is required. Please set GEMINI_API_KEY in .env or enter it in the sidebar.")
+            return
+
+        orig_clean = original_text.strip()
+        leak_clean = leaked_text.strip()
+        if not orig_clean and not leak_clean:
+            st.error("Both Canonical Reference text and Leaked text are empty. Please provide content for both before running forensic analysis.")
+            return
+        elif not orig_clean:
+            st.error("Canonical Reference document text is empty. Please select or paste a valid reference document.")
+            return
+        elif not leak_clean:
+            st.error("Leaked document text is empty. Please paste leaked content or upload a document in the Leak Investigation view.")
             return
 
         with st.spinner("Analyzing document differences, paraphrasing, and severity with Gemini 2.5 Flash..."):
             try:
                 report = gemini_service.analyze_incident(
-                 original_text=original_text,
-                 leaked_text=leaked_text,
-                 metadata=incident_meta,   
+                    original_text=original_text,
+                    leaked_text=leaked_text,
+                    metadata=incident_meta,
+                    api_key=api_key,
                 )
                 st.session_state["forensic_report"] = report
             except Exception as exc:
-                st.error(f"Gemini Forensic Analysis failed: {exc}")
+                exc_type = type(exc).__name__
+                err_clean = gemini_service.sanitize_error_message(str(exc), secret=api_key)
+                logger.error("[CANARYDOCS - APP ERROR] %s: %s", exc_type, err_clean)
+                st.error("Gemini Forensic Analysis failed. Please check local terminal logs for diagnostic details.")
                 return
 
     # Display Report if available
@@ -826,13 +877,19 @@ def view_forensic_analysis() -> None:
         st.divider()
         st.markdown("### 📊 Official Forensic Analysis Report")
 
-        # Severity Card
-        severity_class = f"severity-{report.severity.lower()}"
+        # Severity Card with null-safe fallbacks
+        raw_sev = getattr(report, "severity", None)
+        severity = str(raw_sev).strip().upper() if raw_sev else "MEDIUM"
+        if severity not in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
+            severity = "MEDIUM"
+        severity_class = f"severity-{severity.lower()}"
+        summary = getattr(report, "summary", None) or getattr(report, "impact", None) or "Forensic analysis completed."
+
         st.markdown(
             f"""
             <div class="{severity_class}">
-                <h3 style="margin: 0;">LEAK SEVERITY: {report.severity.upper()}</h3>
-                <p style="margin: 4px 0 0 0;">{report.summary}</p>
+                <h3 style="margin: 0;">LEAK SEVERITY: {severity}</h3>
+                <p style="margin: 4px 0 0 0;">{summary}</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -840,27 +897,32 @@ def view_forensic_analysis() -> None:
 
         col_c1, col_c2 = st.columns([1, 1], gap="medium")
 
+        content_changes = getattr(report, "content_changes", None)
+        possible_redactions = getattr(report, "possible_redactions", None)
+        possible_paraphrasing = getattr(report, "possible_paraphrasing", None)
+        recommendations = getattr(report, "recommendations", None)
+
         with col_c1:
             st.markdown("#### 🔄 Content Differences & Scope")
-            if report.content_changes:
-                if isinstance(report.content_changes, list):
-                    for change in report.content_changes:
+            if content_changes:
+                if isinstance(content_changes, list):
+                    for change in content_changes:
                         if isinstance(change, dict):
                             desc = change.get("description") or change.get("explanation") or change.get("change") or str(change)
                             st.markdown(f"- {desc}")
                         else:
                             st.markdown(f"- {change}")
-                elif isinstance(report.content_changes, dict):
-                    for k, v in report.content_changes.items():
+                elif isinstance(content_changes, dict):
+                    for k, v in content_changes.items():
                         st.markdown(f"- **{k.replace('_', ' ').title()}:** {v}")
                 else:
-                    st.markdown(f"- {report.content_changes}")
+                    st.markdown(f"- {content_changes}")
             else:
                 st.markdown("*(No significant textual discrepancies detected)*")
 
             st.markdown("#### ✂️ Redactions & Missing Sections")
             _render_structured_detection(
-                report.possible_redactions,
+                possible_redactions,
                 empty_label="No sensitive sections appear redacted",
                 icon="⚠️",
             )
@@ -868,31 +930,32 @@ def view_forensic_analysis() -> None:
         with col_c2:
             st.markdown("#### ✍️ Paraphrasing & Rewriting Analysis")
             _render_structured_detection(
-                report.possible_paraphrasing,
+                possible_paraphrasing,
                 empty_label="Text matches verbatim; no paraphrasing found",
                 icon="🔍",
             )
 
             st.markdown("#### 🛡️ Recommended Incident Response Actions")
-            if report.recommendations:
-                if isinstance(report.recommendations, list):
-                    for rec in report.recommendations:
+            if recommendations:
+                if isinstance(recommendations, list):
+                    for rec in recommendations:
                         if isinstance(rec, dict):
                             action = rec.get("action") or rec.get("recommendation") or rec.get("description") or str(rec)
                             st.markdown(f"- [ ] {action}")
                         else:
                             st.markdown(f"- [ ] {rec}")
-                elif isinstance(report.recommendations, dict):
-                    for k, v in report.recommendations.items():
+                elif isinstance(recommendations, dict):
+                    for k, v in recommendations.items():
                         st.markdown(f"- [ ] **{k.replace('_', ' ').title()}:** {v}")
                 else:
-                    st.markdown(f"- [ ] {report.recommendations}")
+                    st.markdown(f"- [ ] {recommendations}")
             else:
                 st.markdown("*(Standard forensic retention recommended)*")
 
         # Raw Forensic JSON Output
         with st.expander("📄 View Structured Forensic Report (JSON)"):
-            st.json(vars(report))
+            report_dict = vars(report) if hasattr(report, "__dict__") else {"report": str(report)}
+            st.json(report_dict)
 
 
 # ==============================================================================

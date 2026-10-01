@@ -184,3 +184,119 @@ def test_audit_log_view_populated_database(tmp_path: Path, monkeypatch):
         pytest.fail(f"view_audit_log crashed on populated database: {exc}")
 
 
+def test_corrupted_pdf_investigation_handling(tmp_path: Path):
+    """Verify corrupted/malformed PDF returns structured ERROR without crashing."""
+    import investigator
+
+    corrupt_pdf = tmp_path / "corrupted.pdf"
+    corrupt_pdf.write_bytes(b"%PDF-1.4 malformed header and corrupted binary garbage \x00\xff\xfe")
+
+    result = investigator.investigate_document(corrupt_pdf)
+    assert result.matched is False
+    assert result.status == investigator.STATE_ERROR
+    assert "Corrupted or invalid PDF file" in result.message
+    assert result.fingerprint is None
+
+
+def test_empty_files_investigation_handling(tmp_path: Path):
+    """Verify 0-byte PDF and TXT files return STATE_NO_FINGERPRINT gracefully."""
+    import investigator
+
+    empty_pdf = tmp_path / "empty.pdf"
+    empty_pdf.write_bytes(b"")
+
+    res_pdf = investigator.investigate_document(empty_pdf)
+    assert res_pdf.matched is False
+    assert res_pdf.status == investigator.STATE_NO_FINGERPRINT
+    assert res_pdf.fingerprint is None
+    assert "empty" in res_pdf.details.lower()
+
+    empty_txt = tmp_path / "empty.txt"
+    empty_txt.write_text("", encoding="utf-8")
+
+    res_txt = investigator.investigate_document(empty_txt)
+    assert res_txt.matched is False
+    assert res_txt.status == investigator.STATE_NO_FINGERPRINT
+    assert res_txt.fingerprint is None
+    assert "empty" in res_txt.details.lower()
+
+
+def test_unsupported_file_extension_handling(tmp_path: Path):
+    """Verify unsupported file types return structured ERROR with informative message."""
+    import investigator
+
+    unsupported_file = tmp_path / "leak.docx"
+    unsupported_file.write_bytes(b"PK\x03\x04 fake docx")
+
+    result = investigator.investigate_document(unsupported_file)
+    assert result.matched is False
+    assert result.status == investigator.STATE_ERROR
+    assert "Unsupported document format" in result.message
+    assert ".docx" in result.message
+
+
+def test_gemini_empty_text_safeguards():
+    """Verify Gemini forensic analysis handles empty inputs without calling API."""
+    import gemini_service
+
+    # Empty original
+    rep1 = gemini_service.analyze_incident(original_text="", leaked_text="leaked content")
+    assert rep1.severity == "LOW"
+    assert "empty" in rep1.summary.lower()
+    assert rep1.possible_paraphrasing["detected"] is False
+
+    # Empty leaked
+    rep2 = gemini_service.analyze_incident(original_text="original content", leaked_text="")
+    assert rep2.severity == "LOW"
+    assert "empty" in rep2.summary.lower()
+    assert rep2.possible_redactions["detected"] is True
+
+
+def test_gemini_api_key_sanitization_and_friendly_messages():
+    """Verify API errors redact leaked API keys and provide friendly summaries for 429 and 401."""
+    import gemini_service
+    from unittest.mock import MagicMock
+
+    # Test 429 Quota Exceeded with embedded API key
+    fake_key = "AIzaSyB1234567890abcdef1234567890abcdef"
+    mock_client_429 = MagicMock()
+    mock_client_429.models.generate_content.side_effect = RuntimeError(
+        f"Request to https://generativelanguage.googleapis.com/v1beta?key={fake_key} failed: 429 RESOURCE_EXHAUSTED"
+    )
+
+    report_429 = gemini_service.analyze_incident(
+        original_text="Original text",
+        leaked_text="Leaked text",
+        client=mock_client_429,
+    )
+    assert fake_key not in report_429.impact
+    assert fake_key not in report_429.raw_analysis
+    assert "[REDACTED_API_KEY]" in report_429.impact
+    assert "rate limit or quota exceeded (429)" in report_429.summary
+
+    # Test 401 Invalid Key
+    mock_client_401 = MagicMock()
+    mock_client_401.models.generate_content.side_effect = RuntimeError(
+        f"Error 401 API_KEY_INVALID for key={fake_key}"
+    )
+
+    report_401 = gemini_service.analyze_incident(
+        original_text="Original text",
+        leaked_text="Leaked text",
+        client=mock_client_401,
+    )
+    assert fake_key not in report_401.impact
+    assert "[REDACTED_API_KEY]" in report_401.impact
+    assert "Invalid or unauthorized Gemini API key" in report_401.summary
+
+
+def test_gemini_missing_api_key_error(monkeypatch):
+    """Verify get_gemini_client raises ValueError with informative message when key is missing."""
+    import gemini_service
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="GEMINI_API_KEY is not set"):
+        gemini_service.get_gemini_client(api_key=None)
+
+
+
